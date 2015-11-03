@@ -14,3 +14,7 @@ def build(bld):
                 target='experiments/test_memory_order',
                 lib='pthread',
                 stlib='benchmark')
+
+    bld.program(source='experiments/memory_reordering/memory_reordering.cpp',
+                target='experiments/test_memory_reordering',
+                lib='pthread')
