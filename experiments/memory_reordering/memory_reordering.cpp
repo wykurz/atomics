@@ -1,86 +1,115 @@
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cassert>
 #include <chrono>
 #include <functional>
 #include <iostream>
+#include <numeric>
 #include <thread>
 
 constexpr std::size_t NUM_THREADS = 2;
 
-int storeLoad(int& x, int& y)
-{
-    // Reordering means both functions return 0
-    int r = 0;
-    x = 1;
-    r = y;
-    return r;
-}
+using TestType = int;
 
-int loadStore(int& x, int& y)
+static std::array<TestType, NUM_THREADS> mem;
+static std::array<TestType, NUM_THREADS> ret;
+
+struct StoreLoad
 {
-    // Reordering means both functions return 1
-    int r = 1;
-    r = y;
-    x = 0;
-    return r;
-}
+    StoreLoad(std::size_t thread_)
+        : thread(thread_)
+    {
+        static_assert(2 == NUM_THREADS, "StoreLoad test requires exactly 2 threads.");
+        assert(thread < NUM_THREADS);
+    }
+
+    void run()
+    {
+        TestType& x = mem[thread];
+        TestType& y = mem[(thread + 1) & NUM_THREADS];
+        // Reordering means both functions return 0
+        TestType r = 0;
+        delay();
+        x = 1;
+        asm volatile("" ::: "memory");
+        r = y;
+        ret[thread] = r;
+    }
+
+    void check()
+    {
+        if (not isControl())
+            return;
+        reordered += (0 == std::accumulate(ret.begin(), ret.end(), 0)) ? 1 : 0;
+        ++checks;
+    }
+
+    void reset()
+    {
+        if (not isControl())
+            return;
+        std::fill(mem.begin(), mem.end(), 0);
+        std::fill(ret.begin(), ret.end(), 0);
+    }
+
+    void print() const
+    {
+        if (not isControl())
+            return;
+        std::cerr << "Reordered: " << reordered << std::endl;
+        std::cerr << "Checks:    " << checks << std::endl;
+    }
+
+  private:
+    void delay()
+    {
+        constexpr std::size_t maxSpins = 8;
+        std::size_t spins = ((thread + 2) * checks) % maxSpins;
+        while (0 < spins--) {};
+    }
+
+    bool isControl() const
+    {
+        return 0 == thread;
+    }
+
+    const std::size_t thread;
+    std::size_t reordered = 0;
+    std::size_t checks = 0;
+};
+
+static std::atomic<bool> done(false);
 
 void synchronize(const std::size_t round)
 {
     static std::atomic<std::size_t> sync(0);
     ++sync;
-    while (sync < round * NUM_THREADS) {}
+    while (not done and sync < round * NUM_THREADS) {}
 }
 
-static std::atomic<bool> done(false);
-
-template<typename Func>
-void run(Func func, std::size_t thread)
+template<typename Test>
+void run(Test& test)
 {
-    static std::array<std::size_t, NUM_THREADS> results;
-    std::fill(results.begin(), results.end(), 1);
     std::size_t round = 0;
-    std::size_t count = 0;
     while (not done)
     {
         synchronize(++round);
-        results[thread] = 0;
+        test.reset();
         synchronize(++round);
-        results[thread] = func();
+        test.run();
         synchronize(++round);
-        if (0 == thread)
-        {
-            bool reordered = true;
-            for (auto& r: results)
-            {
-                if (r != 0)
-                {
-                    reordered = false;
-                }
-                r = 1;
-            }
-            if (reordered)
-            {
-                ++count;
-            }
-        }
+        test.check();
     }
-    if (0 == thread)
-    {
-        std::cerr << "Reordered:" << count << std::endl;
-        std::cerr << "Rounds:   " << round << std::endl;
-    }
+    test.print();
 }
 
 int main()
 {
-    int x;
-    int y;
-    auto f1 = [&x, &y](){ return storeLoad(x, y); };
-    auto f2 = [&x, &y](){ return storeLoad(y, x); };
-    std::thread t1([f1](){ run(f1, 0); });
-    std::thread t2([f2](){ run(f2, 1); });
+    StoreLoad sl0(0);
+    StoreLoad sl1(1);
+    std::thread t1([&](){ run(sl0); });
+    std::thread t2([&](){ run(sl1); });
     std::this_thread::sleep_for(std::chrono::seconds(10));
     done = true;
     t1.join();
